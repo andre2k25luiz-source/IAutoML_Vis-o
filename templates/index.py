@@ -8,9 +8,12 @@ import io
 import json
 import cv2
 import os
+import random
 
 st.set_page_config(layout="wide")
-st.title("Anotador YOLO - Editor Visual")
+st.title("IAutoML_Visão_V2 - Auto ML")
+
+API_URL = "http://127.0.0.1:5000"
 
 # Inicializar session state
 if "reset" not in st.session_state:
@@ -233,7 +236,7 @@ if uploaded_file:
             
             if st.button("💾 Enviar para o Backend", type="primary", use_container_width=True):
                 buffered = io.BytesIO()
-                resized_image.save(buffered, format="JPEG")
+                resized_image.save(buffered, format="JPEG", quality=70)
                 img_str = base64.b64encode(buffered.getvalue()).decode()
                 
                 payload = {
@@ -243,8 +246,8 @@ if uploaded_file:
                 }
                 
                 try:
-                    url_flask = "http://127.0.0.1:5000/save_yolo"
-                    res = requests.post(url_flask, json=payload, timeout=10)
+                    # url_flask = "http://127.0.0.1:5000/save_yolo"
+                    res = requests.post(f"{API_URL}/save_yolo", json=payload, timeout=100)
                     if res.status_code == 200:
                         st.success(f"✅ Salvo! {len(yolo_labels)} boxes")
                         st.session_state.boxes = []
@@ -282,7 +285,7 @@ if st.button("🚀 Treinar Modelo", use_container_width=True):
 
     with st.spinner("Treinando modelo... ⏳"):
         try:
-            res = requests.post("http://127.0.0.1:5000/train", timeout=300)
+            res = requests.post(f"{API_URL}/train", timeout=None)
 
             if res.status_code == 200:
                 st.success("✅ Modelo treinado!")
@@ -352,16 +355,22 @@ val_path = "dataset_final/val/images"
 if st.button("📂 Rodar em 1 imagem da validação"):
 
     files = [f for f in os.listdir(val_path) if f.lower().endswith((".jpg",".png",".jpeg"))]
+    img_name = random.choice(files)
+    img_path = os.path.join(val_path, img_name)
 
     if len(files) == 0:
         st.error("Nenhuma imagem encontrada no val")
     else:
-        img_path = os.path.join(val_path, files[0])
+        if len(files) == 0:
+            st.error("Nenhuma imagem encontrada no val")
+        else:
+            img_name = random.choice(files)
+            img_path = os.path.join(val_path, img_name)
 
         image = Image.open(img_path).convert("RGB")
         resized_val, scale, offset_x, offset_y = resize_with_padding(image)
 
-        st.caption(f"Imagem usada: {files[0]}")
+        st.caption(f"Imagem usada: {img_name}")
 
         # preparar request
         buffered = io.BytesIO()
@@ -375,56 +384,40 @@ if st.button("📂 Rodar em 1 imagem da validação"):
 
         data = res.json()
 
-        if "detections" not in data:
-            st.error("Erro na predição")
+        if "error" in data:
+            st.error(data["error"])
+
         else:
 
-            img_np = np.array(resized_val)
+            # 🔥 imagem do YOLO (backend)
+            if "image" in data:
+                img = base64.b64decode(data["image"])
+                st.image(img, caption="Resultado YOLO")
 
-            for det in data["detections"]:
+            # 🔥 fallback: desenhar manual
+            elif "detections" in data:
 
-                x1, y1, x2, y2 = map(int, [
-                    det["x1"], det["y1"], det["x2"], det["y2"]
-                ])
+                img_np = np.array(resized_val)
 
-                cls = det["class"]
-                conf = det["conf"]
+                for det in data["detections"]:
 
-                # 🔥 caixa
-                cv2.rectangle(
-                    img_np,
-                    (x1, y1),
-                    (x2, y2),
-                    (0, 255, 0),
-                    2
-                )
+                    x1, y1, x2, y2 = map(int, [
+                        det["x1"], det["y1"], det["x2"], det["y2"]
+                    ])
 
-                # 🔥 fundo do texto (melhor visual)
-                label = f"Classe {cls} {conf:.2f}"
-                (w, h), _ = cv2.getTextSize(
-                    label,
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    2
-                )
+                    cls = det.get("class_id", -1)
+                    conf = det.get("confidence", 0)
 
-                cv2.rectangle(
-                    img_np,
-                    (x1, y1 - h - 10),
-                    (x1 + w, y1),
-                    (0, 255, 0),
-                    -1
-                )
+                    cv2.rectangle(img_np, (x1, y1), (x2, y2), (0,255,0), 2)
 
-                # texto
-                cv2.putText(
-                    img_np,
-                    label,
-                    (x1, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 0),
-                    2
-                )
+                    label = f"{cls} {conf:.2f}"
+                    cv2.putText(img_np, label, (x1, y1-5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
 
-            st.image(img_np, caption="Resultado com Bounding Boxes")
+                st.image(img_np, caption="Fallback OpenCV")
+
+            else:
+                st.error("Resposta inesperada do backend")
+        
+        # 🔥 DEBUG (importante)
+        st.write(data)
