@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>YOLO Annotator</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+    <style>
+        .controls { margin-bottom: 10px; display: flex; gap: 10px; align-items: center; }
+        canvas { border: 1px solid #ccc; }
+        body { font-family: sans-serif; padding: 20px; background: #f0f0f0; }
+    </style>
+</head>
+<body>
+    <h2>Anotador YOLO - Editor Visual</h2>
+    
+    <div class="controls">
+        <input type="file" id="imageLoader" accept="image/*">
+        <select id="mode">
+            <option value="draw">✏️ Desenhar</option>
+            <option value="select">🖱️ Mover/Editar</option>
+        </select>
+        <label>ID:</label>
+        <input type="number" id="classId" value="0" min="0" style="width: 50px;">
+        <button onclick="saveAnnotations()">💾 Salvar Anotações</button>
+        <button onclick="runAction('/build_dataset')">🛠️ Build Dataset</button>
+        <button onclick="runAction('/train')">🚀 Treinar Modelo</button>
+        <button onclick="predictFromVal()">🔍 Predict (IA)</button>
+    </div>
+
+    <canvas id="canvas" width="640" height="640"></canvas>
+
+    <script>
+    // Inicializa o canvas e garante que ele seja acessível globalmente
+    const canvas = new fabric.Canvas('canvas', {
+        backgroundColor: '#fff'
+    });
+    
+    const COLORS = ["#FF0000", "#00FF00", "#0000FF", "#FFA500", "#800080"];
+    let isDrawing = false, rect, origX, origY;
+
+    async function runAction(route) {
+        const btn = event.target;
+        btn.innerText = "Processando...";
+        btn.disabled = true;
+        
+        try {
+            const response = await fetch(route, { method: 'POST' });
+            const result = await response.json();
+            alert(result.status || result.msg);
+        } catch (e) {
+            alert("Erro na operação");
+        } finally {
+            btn.disabled = false;
+            btn.innerText = route.includes('train') ? "🚀 Treinar Modelo" : "🛠️ Build Dataset";
+        }
+    }
+
+    // 1. Carregar Imagem (Ajustado para garantir exibição)
+    document.getElementById('imageLoader').onchange = function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(f) {
+            const data = f.target.result;
+            
+            // Criamos um elemento de imagem nativo primeiro para garantir o carregamento
+            const imgElement = new Image();
+            imgElement.src = data;
+            
+            imgElement.onload = function() {
+                const fabricImage = new fabric.Image(imgElement);
+                
+                canvas.clear(); // Remove boxes anteriores ao trocar de imagem
+                
+                // Redimensiona a imagem para preencher o canvas 640x640
+                fabricImage.set({
+                    scaleX: 640 / imgElement.width,
+                    scaleY: 640 / imgElement.height,
+                    selectable: false,
+                    evented: false
+                });
+
+                canvas.setBackgroundImage(fabricImage, canvas.renderAll.bind(canvas));
+            };
+        };
+        reader.readAsDataURL(file);
+    };
+
+    // 2. Lógica de Desenho (Suporta desenhar para qualquer direção)
+    canvas.on('mouse:down', function(o) {
+        if (document.getElementById('mode').value !== 'draw') return;
+        isDrawing = true;
+        const pointer = canvas.getPointer(o.e);
+        origX = pointer.x;
+        origY = pointer.y;
+        
+        rect = new fabric.Rect({
+            left: origX,
+            top: origY,
+            width: 0,
+            height: 0,
+            fill: 'transparent',
+            stroke: COLORS[document.getElementById('classId').value % COLORS.length],
+            strokeWidth: 3,
+            selectable: false,
+            data: { class_id: document.getElementById('classId').value }
+        });
+        canvas.add(rect);
+    });
+
+    canvas.on('mouse:move', function(o) {
+        if (!isDrawing) return;
+        const pointer = canvas.getPointer(o.e);
+        
+        if (origX > pointer.x) rect.set({ left: pointer.x });
+        if (origY > pointer.y) rect.set({ top: pointer.y });
+        
+        rect.set({ 
+            width: Math.abs(origX - pointer.x),
+            height: Math.abs(origY - pointer.y) 
+        });
+        canvas.renderAll();
+    });
+
+    canvas.on('mouse:up', () => { isDrawing = false; rect?.setCoords(); });
+
+    // 3. Alternar Modos
+    document.getElementById('mode').onchange = function() {
+        const isSelect = this.value === 'select';
+        canvas.getObjects().forEach(obj => obj.selectable = isSelect);
+        canvas.discardActiveObject().renderAll();
+    };
+
+    // 4. Enviar para o Flask (URL absoluta para teste local)
+    async function saveAnnotations() {
+        // 1. Captura a imagem do canvas em Base64 (sem o prefixo 'data:image/...')
+        const dataURL = canvas.toDataURL({ format: 'jpeg', quality: 0.8 });
+        const base64Image = dataURL.split(',')[1];
+
+        // 2. Converte as boxes para o formato YOLO (strings: "id x_center y_center width height")
+        // Importante: YOLO usa valores normalizados de 0 a 1
+        const yoloLabels = canvas.getObjects('rect').map(obj => {
+            const id = obj.data?.class_id || 0;
+            const w = obj.getScaledWidth();
+            const h = obj.getScaledHeight();
+            
+            // Cálculo do centro e normalização (considerando canvas 640x640)
+            const x_center = (obj.left + w / 2) / 640;
+            const y_center = (obj.top + h / 2) / 640;
+            const norm_w = w / 640;
+            const norm_h = h / 640;
+
+            return `${id} ${x_center.toFixed(6)} ${y_center.toFixed(6)} ${norm_w.toFixed(6)} ${norm_h.toFixed(6)}`;
+        });
+
+        if (yoloLabels.length === 0) {
+            alert("Desenhe pelo menos uma box antes de salvar!");
+            return;
+        }
+
+        // 3. Envia para a rota /save_yolo da sua API
+        const payload = {
+            image_b64: base64Image,
+            filename: "imagem_" + Date.now(), // Gera um nome único
+            labels: yoloLabels
+        };
+
+        try {
+            const response = await fetch('/save_yolo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+            alert("Resposta da API: " + result.msg);
+        } catch (error) {
+            console.error(error);
+            alert("Erro ao conectar com a API");
+        }
+    }
+
+    async function predictFromVal() {
+        try {
+            const response = await fetch('/predict', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}) // Envia vazio para disparar a lógica da pasta /val
+            });
+
+            const result = await response.json();
+            if (result.error) return alert(result.error);
+
+            // 1. Carregar a imagem que o servidor enviou no Canvas
+            const imgElement = new Image();
+            imgElement.src = "data:image/jpeg;base64," + result.image_b64;
+            
+            imgElement.onload = function() {
+                const fabricImage = new fabric.Image(imgElement);
+                canvas.clear();
+                fabricImage.set({ scaleX: 640/imgElement.width, scaleY: 640/imgElement.height, selectable: false });
+                canvas.setBackgroundImage(fabricImage, canvas.renderAll.bind(canvas));
+
+                // 2. Desenhar as detecções
+                result.detections.forEach(det => {
+                    const rect = new fabric.Rect({
+                        left: det.x1, top: det.y1,
+                        width: det.x2 - det.x1, height: det.y2 - det.y1,
+                        fill: 'transparent', stroke: '#00FF00', strokeWidth: 2
+                    });
+                    canvas.add(rect);
+                });
+            };
+        } catch (e) {
+            alert("Erro ao buscar predição da pasta /val");
+        }
+    }
+</script>
+</body>
+</html>
