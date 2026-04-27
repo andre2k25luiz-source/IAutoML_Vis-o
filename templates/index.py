@@ -11,7 +11,8 @@ import os
 import random
 
 st.set_page_config(layout="wide")
-st.title("IAutoML_Visão_V2 - Auto ML")
+st.title("IAutoML_Visão_V2 - ConfigDetector")
+st.write("arquiteturas inteligentes para detector configurável de objetos.")
 
 API_URL = "http://127.0.0.1:5000"
 
